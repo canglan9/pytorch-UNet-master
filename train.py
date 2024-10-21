@@ -1,5 +1,5 @@
 import os
-
+import torch.nn as nn
 import torch.optim as optim
 import torch
 from functools import partial
@@ -11,16 +11,29 @@ from unet.utils import MetricList
 from unet.metrics import jaccard_index, f1_score, LogNLLLoss
 from unet.dataset import JointTransform2D, ImageToImage2D, Image2D
 
+class DiceLoss(nn.Module):
+    def __init__(self):
+        super(DiceLoss, self).__init__()
+
+    def forward(self, inputs, targets):
+        # inputs: model output, targets: true masks
+        inputs = torch.sigmoid(inputs).flatten(1)
+        targets = targets.flatten(1)
+
+        intersection = (inputs * targets).sum()
+        dice = (2. * intersection ) / (inputs.sum() + targets.sum() )
+        return 1 - dice
+
 parser = ArgumentParser()
-parser.add_argument('--train_dataset',default='docs/',  type=str)
-parser.add_argument('--val_dataset', default='docs/4351',type=str)
+parser.add_argument('--train_dataset',default='docs/training_set',  type=str)
+parser.add_argument('--val_dataset', default='docs/val_set',type=str)
 parser.add_argument('--checkpoint_path', default='docs/personal_result', type=str)
 parser.add_argument('--device', default='cpu', type=str)
 parser.add_argument('--in_channels', default=3, type=int)
 parser.add_argument('--out_channels', default=1, type=int)
 parser.add_argument('--depth', default=5, type=int)
 parser.add_argument('--width', default=32, type=int)
-parser.add_argument('--epochs', default=100, type=int)
+parser.add_argument('--epochs', default=40, type=int)
 parser.add_argument('--batch_size', default=1, type=int)
 parser.add_argument('--save_freq', default=1, type=int)
 parser.add_argument('--save_model', default=1, type=int)
@@ -43,7 +56,8 @@ predict_dataset = Image2D(args.val_dataset)
 conv_depths = [int(args.width*(2**k)) for k in range(args.depth)]
 unet = UNet2D(args.in_channels, args.out_channels, conv_depths)
 
-loss = torch.nn.BCEWithLogitsLoss()
+#loss = torch.nn.BCEWithLogitsLoss()
+loss = DiceLoss()
 optimizer = optim.Adam(unet.parameters(), lr=args.learning_rate)
 
 results_folder = os.path.join(args.checkpoint_path, args.model_name)
