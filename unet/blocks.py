@@ -1,4 +1,5 @@
 import torch.nn as nn
+import torch
 from torch.nn.modules.loss import _Loss
 
 
@@ -123,14 +124,16 @@ class Last2D(nn.Module):
             nn.BatchNorm2d(middle_channels),
             nn.ReLU(inplace=True),
             nn.Conv2d(middle_channels, out_channels, kernel_size=1),
-            nn.Softmax(dim=1)
+            #nn.Softmax(dim=1)
         ]
 
         self.first = nn.Sequential(*layers)
 
     def forward(self, x):
-        return self.first(x)
-
+        #return self.first(x)
+        x = self.first(x)
+        x = torch.sigmoid(x)
+        return x
 
 class First3D(nn.Module):
     def __init__(self, in_channels, middle_channels, out_channels, dropout=False):
