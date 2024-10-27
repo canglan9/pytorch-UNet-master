@@ -1,0 +1,233 @@
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+import numpy as np
+from skimage.transform import resize
+from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
+from torch.optim.lr_scheduler import ReduceLROnPlateau
+
+# 设置图像尺寸
+image_rows = 320
+image_cols = 480
+
+class UNet2D(nn.Module):
+    def __init__(self):
+        super(UNet2D, self).__init__()
+        self.conv1 = self._conv_block(3, 32)
+        self.pool1 = nn.MaxPool2d(2)
+
+        self.conv2 = self._conv_block(32, 64)
+        self.pool2 = nn.MaxPool2d(2)
+
+        self.conv3 = self._conv_block(64, 128)
+        self.pool3 = nn.MaxPool2d(2)
+
+        self.conv4 = self._conv_block(128, 256)
+        self.pool4 = nn.MaxPool2d(2)
+
+        self.conv5 = self._conv_block(256, 512)
+
+        self.up6 = nn.ConvTranspose2d(512, 256, kernel_size=2, stride=2)
+        self.conv6 = self._conv_block(512, 256)
+
+        self.up7 = nn.ConvTranspose2d(256, 128, kernel_size=2, stride=2)
+        self.conv7 = self._conv_block(256, 128)
+
+        self.up8 = nn.ConvTranspose2d(128, 64, kernel_size=2, stride=2)
+        self.conv8 = self._conv_block(128, 64)
+
+        self.up9 = nn.ConvTranspose2d(64, 32, kernel_size=2, stride=2)
+        self.conv9 = self._conv_block(64, 32)
+
+        self.final = nn.Conv2d(32, 1, kernel_size=1)
+
+    def _conv_block(self, in_channels, out_channels):
+        return nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+        )
+
+    def forward(self, x):
+        conv1 = self.conv1(x)
+        pool1 = self.pool1(conv1)
+
+        conv2 = self.conv2(pool1)
+        pool2 = self.pool2(conv2)
+
+        conv3 = self.conv3(pool2)
+        pool3 = self.pool3(conv3)
+
+        conv4 = self.conv4(pool3)
+        pool4 = self.pool4(conv4)
+
+        conv5 = self.conv5(pool4)
+
+        up6 = self.up6(conv5)
+        merge6 = torch.cat([up6, conv4], dim=1)
+        conv6 = self.conv6(merge6)
+
+        up7 = self.up7(conv6)
+        merge7 = torch.cat([up7, conv3], dim=1)
+        conv7 = self.conv7(merge7)
+
+        up8 = self.up8(conv7)
+        merge8 = torch.cat([up8, conv2], dim=1)
+        conv8 = self.conv8(merge8)
+
+        up9 = self.up9(conv8)
+        merge9 = torch.cat([up9, conv1], dim=1)
+        conv9 = self.conv9(merge9)
+
+        output = self.final(conv9)
+        return torch.sigmoid(output)
+
+class DiceLoss(nn.Module):
+    def __init__(self, smooth=1e-5):
+        super(DiceLoss, self).__init__()
+        self.smooth = smooth
+
+    def forward(self, pred, target):
+        pred = pred.view(-1)
+        target = target.view(-1)
+        intersection = (pred * target).sum()
+        dice = (2. * intersection + self.smooth) / (pred.sum() + target.sum() + self.smooth)
+        return 1 - dice
+
+def preprocess_images(imgs):
+    imgs_p = np.zeros((imgs.shape[0], 3, image_rows, image_cols), dtype=np.float32)
+    for i in range(imgs.shape[0]):
+        for j in range(3):
+            resized_img = resize(imgs[i, j, :, :], (image_rows, image_cols), preserve_range=True)
+            imgs_p[i, j, :, :] = resized_img
+    return imgs_p
+
+def preprocess_masks(masks):
+    masks_p = np.zeros((masks.shape[0], image_rows, image_cols), dtype=np.float32)
+    for i in range(masks.shape[0]):
+        resized_mask = resize(masks[i, :, :], (image_rows, image_cols), preserve_range=True)
+        masks_p[i, :, :] = resized_mask
+    masks_p[masks_p > 0.5] = 1
+    masks_p[masks_p <= 0.5] = 0
+    return masks_p
+
+
+def visualize_batch(images, masks, batch_idx=0):
+    """
+    显示输入的图像和对应的掩码。
+    :param images: Tensor, 输入图像，形状为 (batch_size, channels, height, width)
+    :param masks: Tensor, 输入掩码，形状为 (batch_size, 1, height, width)
+    :param batch_idx: int, 选择批次中的哪一个样本进行显示
+    """
+    # 转换图像和掩码到 CPU 并转换为 NumPy 格式
+    image = images[batch_idx].transpose(1, 2, 0)  # (height, width, channels)
+
+    mask = masks[batch_idx].squeeze()  # (height, width)
+
+    plt.figure(figsize=(10, 5))
+
+    # 显示图像
+    plt.subplot(1, 2, 1)
+    plt.title("Input Image")
+    plt.imshow(image, cmap='gray' )  # 灰度图显示模式
+
+    # 显示掩码
+    plt.subplot(1, 2, 2)
+    plt.title("Mask")
+    plt.imshow(mask, cmap='gray')
+
+    plt.show()
+
+def train_and_predict():
+    print('-' * 30)
+    print('加载和预处理训练数据...')
+    print('-' * 30)
+
+    imgs_train = np.load('imgs_train.npy')
+    imgs_mask_train = np.load('imgs_mask_train.npy')
+    imgs_train = preprocess_images(imgs_train)
+    imgs_mask_train = preprocess_masks(imgs_mask_train)
+
+    imgs_train = imgs_train.astype('float32')
+    mean = np.mean(imgs_train)
+    std = np.std(imgs_train)
+    imgs_train -= mean
+    imgs_train /= std
+    imgs_mask_train = imgs_mask_train.astype('float32')
+
+    X_train = torch.tensor(imgs_train).permute(0, 1, 2, 3)
+    y_train = torch.tensor(imgs_mask_train).unsqueeze(1)
+
+    X_train, X_val, y_train, y_val = train_test_split(X_train, y_train, test_size=0.2, random_state=42)
+
+    train_dataset = TensorDataset(X_train, y_train)
+    val_dataset = TensorDataset(X_val, y_val)
+    train_loader = DataLoader(train_dataset, batch_size=4, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=2)
+
+    print('-' * 30)
+    print('创建模型...')
+    print('-' * 30)
+
+    model = UNet2D().cuda()
+    criterion = DiceLoss()
+    optimizer = optim.Adam(model.parameters(), lr=1e-4)
+    scheduler = ReduceLROnPlateau(optimizer, 'min', patience=5, factor=0.5)
+
+    print('-' * 30)
+    print('开始训练...')
+    print('-' * 30)
+
+    num_epochs = 10
+    for epoch in range(num_epochs):
+        model.train()
+        running_loss = 0.0
+
+        for i, (inputs, masks) in enumerate(train_loader):
+            inputs = inputs.cuda()
+            masks = masks.cuda()
+
+            optimizer.zero_grad()
+            outputs = model(inputs)
+
+            loss = criterion(outputs, masks)
+            loss.backward()
+            optimizer.step()
+
+            running_loss += loss.item()
+
+        average_loss = running_loss / len(train_loader)
+        print(f'Epoch [{epoch + 1}/{num_epochs}], Training Loss: {average_loss:.4f}')
+
+        # 验证集评估
+        model.eval()  # 切换到评估模式
+        val_loss = 0.0
+        with torch.no_grad():
+            for val_inputs, val_masks in val_loader:
+                val_inputs = val_inputs.cuda()
+                val_masks = val_masks.cuda()
+                val_outputs = model(val_inputs)
+                loss = criterion(val_outputs, val_masks)
+                val_loss += loss.item()
+
+        average_val_loss = val_loss / len(val_loader)
+        print(f'Validation Loss: {average_val_loss:.4f}')
+
+        # 调整学习率
+        scheduler.step(average_val_loss)
+
+        if (epoch + 1) % 1 == 0:
+            visualize_batch(imgs_train, imgs_mask_train)
+
+    print('-' * 30)
+    print('训练完成...')
+    print('-' * 30)
+    # 保存整个模型
+    torch.save(model.state_dict(), 'weights.pth')  # 正确保存
+
+
+if __name__ == '__main__':
+    train_and_predict()
